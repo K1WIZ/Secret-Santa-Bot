@@ -106,7 +106,7 @@ php /var/www/html/ss/secret_santa.php -force
 
 You can also use the Admin page to test pairings without emailing or writing to the DB, using your favorite web browser:
 ```
-https://yourdomain.com/wizworks/ss/admin_secret_santa.php?key=YourSecretKey
+https://yourdomain.com/ss/admin_secret_santa.php?key=YourSecretKey
 ```
 Tools available:
 
