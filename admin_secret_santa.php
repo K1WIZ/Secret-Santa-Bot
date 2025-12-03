@@ -3,6 +3,7 @@
 // Admin/testing page for Secret Santa pairing.
 // - Can run in TEST mode (no DB writes) or COMMIT mode (writes to DB for selected year).
 // - Can send a test email using the configured SMTP/Gmail settings.
+// - Shows a table of all participants and their wish lists.
 
 require __DIR__ . '/vendor/autoload.php'; // PHPMailer via Composer
 $config = require __DIR__ . '/config.php';
@@ -116,9 +117,15 @@ function createMailer(array $smtpConfig): PHPMailer
 }
 
 // ------------------------
-// Fetch participants
+// Fetch participants (include wishlist fields)
 // ------------------------
-$stmt = $pdo->query("SELECT id, first_name, last_name, email, family_unit FROM participants ORDER BY id ASC");
+$stmt = $pdo->query("
+    SELECT
+        id, first_name, last_name, email, family_unit,
+        wish_item1, wish_item2, wish_item3, wish_key
+    FROM participants
+    ORDER BY id ASC
+");
 $participants = $stmt->fetchAll();
 
 if (count($participants) < 2) {
@@ -347,6 +354,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'generate' && empty($er
     input[type="number"] {
         width: 100px;
     }
+    input[type="email"] {
+        width: 260px;
+    }
     input[type="checkbox"] {
         transform: scale(1.1);
         margin-right: 5px;
@@ -388,6 +398,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'generate' && empty($er
         padding: 6px 8px;
         border: 1px solid #32456f;
         font-size: 13px;
+        vertical-align: top;
     }
     th {
         background: #243a6f;
@@ -432,13 +443,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'generate' && empty($er
         border-top: 1px solid #32456f;
         margin: 15px 0;
     }
+    h2 {
+        margin-top: 25px;
+        margin-bottom: 8px;
+        color: #ffd700;
+    }
 </style>
 </head>
 <body>
 <div class="container">
     <h1>🎄 Secret Santa Admin 🎄</h1>
     <div class="subtitle">
-        Generate Secret Santa pairings, commit them to the database, and test SMTP email delivery.
+        Generate Secret Santa pairings, commit them to the database, test SMTP email delivery,<br>
+        and view everyone’s wish lists in one place.
     </div>
 
     <?php if (!empty($error)): ?>
@@ -477,7 +494,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'generate' && empty($er
         <div>
             <label for="test_email">Send a test email to:&nbsp;</label>
             <input type="email" name="test_email" id="test_email"
-                   value="<?php echo h($testEmail); ?>" style="width:260px;">
+                   value="<?php echo h($testEmail); ?>">
         </div>
         <div class="warning-text">
             This sends a <strong>single test email</strong> using your Gmail/SMTP config.
@@ -533,6 +550,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'generate' && empty($er
     <?php elseif ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'generate' && empty($error)): ?>
         <div class="footer-note">No pairings were generated.</div>
     <?php endif; ?>
+
+    <!-- Wishes table -->
+    <h2>All Participants & Wish Lists</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Name</th>
+                <th>Email</th>
+                <th>Family Unit</th>
+                <th>Wish #1</th>
+                <th>Wish #2</th>
+                <th>Wish #3</th>
+            </tr>
+        </thead>
+        <tbody>
+        <?php foreach ($participants as $idx => $p): ?>
+            <tr>
+                <td><?php echo h($idx + 1); ?></td>
+                <td><?php echo h($p['first_name'] . ' ' . $p['last_name']); ?></td>
+                <td><?php echo h($p['email']); ?></td>
+                <td><?php echo h($p['family_unit']); ?></td>
+                <td><?php echo h($p['wish_item1'] ?? ''); ?></td>
+                <td><?php echo h($p['wish_item2'] ?? ''); ?></td>
+                <td><?php echo h($p['wish_item3'] ?? ''); ?></td>
+            </tr>
+        <?php endforeach; ?>
+        </tbody>
+    </table>
+    <div class="footer-note">
+        This table reflects the latest wishes saved via <code>wishes.php</code>.
+        Great for sanity-checking who wants what before the big reveal.
+    </div>
 </div>
 </body>
 </html>
