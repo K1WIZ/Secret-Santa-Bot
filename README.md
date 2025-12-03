@@ -25,7 +25,8 @@ In other words:
 - 💌 Sends individual HTML emails to participants  
 - 🎄 Colorful Christmas-themed template  
 - 🔒 Avoids same-family matchups  
-- 🔁 Avoids pairing repeats from last year  
+- 🔁 Avoids pairing repeats from last year
+- ✨ Secret Santas can view their person's Wish List, and set their own
 - 📬 Sends admin a complete pairing list  
 - 🧪 Admin dashboard:  
   - Test pairings  
@@ -54,9 +55,21 @@ CREATE TABLE participants (
     first_name VARCHAR(100) NOT NULL,
     last_name  VARCHAR(100) NOT NULL,
     email      VARCHAR(255) NOT NULL,
-    family_unit INT NOT NULL
+    family_unit INT NOT NULL,
+
+    -- Wishlist fields
+    wish_item1 VARCHAR(255) NULL,
+    wish_item2 VARCHAR(255) NULL,
+    wish_item3 VARCHAR(255) NULL,
+
+    -- Per-user secret key for wishlist access
+    wish_key   VARCHAR(64)  NULL,
+
+    -- Optional but recommended: enforce unique keys once generated
+    UNIQUE KEY uniq_wish_key (wish_key)
 );
 
+-- Table storing pairings for each year
 CREATE TABLE secret_santa_pairs (
     id INT AUTO_INCREMENT PRIMARY KEY,
     year INT NOT NULL,
@@ -69,12 +82,17 @@ CREATE TABLE secret_santa_pairs (
 
 ### 3. Create a config.php file
 ```
+<?php
+// config.php
+
 return [
     'db' => [
         'dsn'      => 'mysql:host=localhost;dbname=secret_santa;charset=utf8mb4',
-        'user'     => 'YOUR_DB_USER',
-        'password' => 'YOUR_DB_PASS',
+        'user'     => 'dbuser',
+        'password' => 'dbpassword',
     ],
+
+    // Gmail SMTP settings (use an App Password – NOT your raw Gmail password)
     'smtp' => [
         'host'       => 'smtp.gmail.com',
         'port'       => 587,
@@ -82,7 +100,11 @@ return [
         'password'   => 'your_app_password_here',
         'from_email' => 'yourgmail@gmail.com',
         'from_name'  => 'Secret Santa Bot',
-    ]
+    ],
+    'app' => [
+        // No trailing slash
+        'base_url' => 'https://yout.domain/ss'
+    ],
 ];
 ```
 ⚠️ Use a Gmail App Password, not your actual Gmail password!
@@ -99,7 +121,7 @@ sudo chmod -R 755 /var/www/html/ss
 (NOTE: the script will check if it's Thanksgiving Day when run, and if it is, will generate and email pairings)
 
 ### 6. Testing
-If you wish to test the script, you can do so by calling the script and using the -force flag like so:
+If you wish to test the script, you can do so by calling the script and using the `-force` flag like so:
 ```
 php /var/www/html/ss/secret_santa.php -force
 ```
