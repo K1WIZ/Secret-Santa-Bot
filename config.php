@@ -16,5 +16,9 @@ return [
         'password'   => 'your_app_password_here',
         'from_email' => 'yourgmail@gmail.com',
         'from_name'  => 'Secret Santa Bot',
-    ]
+    ],
+    'app' => [
+        // No trailing slash
+        'base_url' => 'https://yout.domain/ss'
+    ],
 ];
