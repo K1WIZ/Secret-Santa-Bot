@@ -5,6 +5,8 @@
 // - With no arguments, it will *only* run on Thanksgiving Day (4th Thursday in November).
 // - When run as: php secret_santa.php -force
 //   it will bypass the Thanksgiving check and run immediately.
+// - Sends individual HTML emails to participants (with wishlist links).
+// - Sends a master list to the admin.
 
 require __DIR__ . '/vendor/autoload.php';  // PHPMailer via Composer
 $config = require __DIR__ . '/config.php';
@@ -63,13 +65,36 @@ try {
     exit(1);
 }
 
+// ---------------------------------------------------------
+// Reset all wishlist items before the new drawing
+// ---------------------------------------------------------
+try {
+    $pdo->exec("
+        UPDATE participants
+        SET wish_item1 = NULL,
+            wish_item2 = NULL,
+            wish_item3 = NULL
+    ");
+    error_log("Secret Santa: All wishlist items cleared prior to drawing for $year.");
+} catch (PDOException $e) {
+    error_log("Secret Santa: Failed to clear wishlist items: " . $e->getMessage());
+    exit(1);
+}
+
+
 // Current year
 $year = (int)date('Y');
 
 // ---------------------------------------------------------
-// Load participants
+// Load participants (including wishlist fields and wish_key)
 // ---------------------------------------------------------
-$stmt = $pdo->query("SELECT id, first_name, last_name, email, family_unit FROM participants ORDER BY id ASC");
+$stmt = $pdo->query("
+    SELECT
+        id, first_name, last_name, email, family_unit,
+        wish_item1, wish_item2, wish_item3, wish_key
+    FROM participants
+    ORDER BY id ASC
+");
 $participants = $stmt->fetchAll();
 
 if (count($participants) < 2) {
@@ -77,7 +102,25 @@ if (count($participants) < 2) {
     exit(1);
 }
 
-// Build lookup by id
+
+// ---------------------------------------------------------
+// Ensure each participant has a unique wish_key
+// ---------------------------------------------------------
+foreach ($participants as &$p) {
+    if (empty($p['wish_key'])) {
+        $key = bin2hex(random_bytes(16));
+        $p['wish_key'] = $key;
+
+        $upd = $pdo->prepare("UPDATE participants SET wish_key = :key WHERE id = :id");
+        $upd->execute([
+            ':key' => $key,
+            ':id'  => $p['id'],
+        ]);
+    }
+}
+unset($p); // break reference
+
+// Build lookup by id (if needed)
 $participantsById = [];
 foreach ($participants as $p) {
     $participantsById[$p['id']] = $p;
@@ -178,13 +221,7 @@ if (!$success) {
 
 // ---------------------------------------------------------
 // Save new pairings to DB
-//   (We assume one set of pairings per year. If you want to re-run,
-//    you can either delete existing rows for $year first, or treat
-//    this as the authoritative run. Here we delete any existing
-//    rows for safety.)
-//
-//   If you *never* re-run for the same year in production, you can remove
-//   the DELETE and rely on INSERT only.
+//   We delete any existing rows for this year, then insert.
 // ---------------------------------------------------------
 try {
     $pdo->beginTransaction();
@@ -233,15 +270,25 @@ function createMailer(array $smtpConfig): PHPMailer
     return $mail;
 }
 
-$mailer = createMailer($config['smtp']);
+$mailer   = createMailer($config['smtp']);
+$baseUrl  = $config['app']['base_url'] ?? '';
+$adminEmail = 'john@wizworks.net';
 
 // ---------------------------------------------------------
-// Build & send individual emails
+// Build HTML email body for recipient (with wishlist links)
 // ---------------------------------------------------------
-function buildRecipientEmailHtml(array $giver, array $receiver, int $year): string
+function buildRecipientEmailHtml(array $giver, array $receiver, int $year, string $baseUrl): string
 {
     $giverName    = htmlspecialchars($giver['first_name'] . ' ' . $giver['last_name']);
     $receiverName = htmlspecialchars($receiver['first_name'] . ' ' . $receiver['last_name']);
+
+    // Link for viewing recipient's wish list + editing own
+    $wishKey = urlencode($giver['wish_key']);
+    $wishlistUrl = rtrim($baseUrl, '/') . '/wishes.php?key=' . $wishKey;
+
+    // Two labeled links, same page with anchors
+    $viewRecipientUrl = $wishlistUrl . '#recipient';
+    $editOwnUrl       = $wishlistUrl . '#mine';
 
     return <<<HTML
 <!DOCTYPE html>
@@ -267,8 +314,22 @@ function buildRecipientEmailHtml(array $giver, array $receiver, int $year): stri
         <div style="font-size:30px;font-weight:bold;color:#b30000;margin:10px 0 10px;">
           {$receiverName}
         </div>
-        <p style="font-size:13px;color:#666;margin:10px 0 0;">
+        <p style="font-size:13px;color:#666;margin:10px 0 15px;">
           🎁 Please keep this a secret and bring some holiday cheer to your person! 🎁
+        </p>
+        <p style="font-size:13px;color:#444;margin:10px 0;">
+          ✅ View <strong>{$receiverName}</strong>'s wish list:
+          <br>
+          <a href="{$viewRecipientUrl}" style="color:#006600;font-weight:bold;">
+            View Their Wishes
+          </a>
+        </p>
+        <p style="font-size:13px;color:#444;margin:10px 0;">
+          ✏️ Enter or update <strong>your own</strong> wish list (up to 3 items):
+          <br>
+          <a href="{$editOwnUrl}" style="color:#b30000;font-weight:bold;">
+            Enter My Wishes
+          </a>
         </p>
       </div>
       <p style="font-size:11px;color:#f0f0f0;margin-top:15px;">
@@ -281,8 +342,10 @@ function buildRecipientEmailHtml(array $giver, array $receiver, int $year): stri
 HTML;
 }
 
+// ---------------------------------------------------------
+// Send individual emails + build master list
+// ---------------------------------------------------------
 $masterListRows = [];
-$adminEmail     = 'john@wizworks.net';
 
 foreach ($participants as $giver) {
     $giverId  = $giver['id'];
@@ -294,7 +357,7 @@ foreach ($participants as $giver) {
         continue;
     }
 
-    $htmlBody = buildRecipientEmailHtml($giver, $receiver, $year);
+    $htmlBody = buildRecipientEmailHtml($giver, $receiver, $year, $baseUrl);
     $subject  = "Your Secret Santa Person for $year 🎄";
 
     try {
@@ -303,7 +366,15 @@ foreach ($participants as $giver) {
         $mail->addAddress($toEmail, $giver['first_name'] . ' ' . $giver['last_name']);
         $mail->Subject = $subject;
         $mail->Body    = $htmlBody;
-        $mail->AltBody = "Hi {$giver['first_name']}, your Secret Santa person for $year is {$receiver['first_name']} {$receiver['last_name']}.";
+
+        // Plain-text fallback including basic info and wishlist URL
+        $wishKey = $giver['wish_key'];
+        $wishlistUrl = rtrim($baseUrl, '/') . '/wishes.php?key=' . $wishKey;
+
+        $mail->AltBody = "Hi {$giver['first_name']},\n\n"
+            . "Your Secret Santa person for $year is {$receiver['first_name']} {$receiver['last_name']}.\n\n"
+            . "View their wish list and enter your own wishes here:\n$wishlistUrl\n\n"
+            . "Please keep this a secret and bring some holiday cheer!";
 
         $mail->send();
     } catch (Exception $e) {
@@ -316,6 +387,7 @@ foreach ($participants as $giver) {
         'receiver' => $receiver['first_name'] . ' ' . $receiver['last_name'],
     ];
 }
+
 
 // ---------------------------------------------------------
 // Send master list to admin
