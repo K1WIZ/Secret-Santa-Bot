@@ -4,8 +4,13 @@
 // - Auth: via ?key=wish_key in URL
 // - Shows recipient's wishes for the current year
 // - Allows user to edit their own 3-item wishlist
+// - When the wishlist is saved, notifies their Secret Santa (giver) by email.
 
+require __DIR__ . '/vendor/autoload.php';
 $config = require __DIR__ . '/config.php';
+
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\Exception;
 
 try {
     $pdo = new PDO(
@@ -25,6 +30,24 @@ try {
 
 function h($s) {
     return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8');
+}
+
+function createMailer(array $smtpConfig): PHPMailer
+{
+    $mail = new PHPMailer(true);
+    $mail->isSMTP();
+    $mail->Host       = $smtpConfig['host'];
+    $mail->SMTPAuth   = true;
+    $mail->Username   = $smtpConfig['username'];
+    $mail->Password   = $smtpConfig['password'];
+    $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
+    $mail->Port       = $smtpConfig['port'];
+
+    $mail->setFrom($smtpConfig['from_email'], $smtpConfig['from_name']);
+    $mail->isHTML(true);
+    $mail->CharSet = 'UTF-8';
+
+    return $mail;
 }
 
 // -------------------------------------------
@@ -54,6 +77,7 @@ if (!$me) {
 }
 
 $year = (int)date('Y');
+$savedMessage = null;
 
 // -------------------------------------------
 // Handle wishlist form submission
@@ -80,7 +104,113 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Refresh $me data
     $stmt->execute([':key' => $key]);
     $me = $stmt->fetch();
+
     $savedMessage = "Your wishlist has been saved. 🎁";
+
+    // -------------------------------------------
+    // Notify this person's Secret Santa (their giver)
+    // -------------------------------------------
+    try {
+        $pairStmt = $pdo->prepare("
+            SELECT giver_id
+            FROM secret_santa_pairs
+            WHERE year = :year AND receiver_id = :receiver_id
+            LIMIT 1
+        ");
+        $pairStmt->execute([
+            ':year'        => $year,
+            ':receiver_id' => $me['id'],
+        ]);
+        $pair = $pairStmt->fetch();
+
+        if ($pair) {
+            // Load giver info
+            $giverStmt = $pdo->prepare("
+                SELECT id, first_name, last_name, email, wish_key
+                FROM participants
+                WHERE id = :id
+            ");
+            $giverStmt->execute([':id' => $pair['giver_id']]);
+            $giver = $giverStmt->fetch();
+
+            if ($giver && !empty($giver['email']) && !empty($giver['wish_key'])) {
+                $mailer  = createMailer($config['smtp']);
+                $baseUrl = rtrim($config['app']['base_url'] ?? '', '/');
+
+                $giverName     = $giver['first_name'] . ' ' . $giver['last_name'];
+                $receiverName  = $me['first_name'] . ' ' . $me['last_name'];
+                $giverWishUrl  = $baseUrl . '/wishes.php?key=' . urlencode($giver['wish_key']) . '#recipient';
+
+                $subject = "New Wish List Update from {$receiverName} 🎄";
+
+                $htmlBody = <<<HTML
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Wish List Update - Secret Santa {$year}</title>
+</head>
+<body style="margin:0;padding:0;background:#0b1b33;font-family:Arial,Helvetica,sans-serif;">
+  <div style="max-width:600px;margin:0 auto;padding:20px;">
+    <div style="background:linear-gradient(135deg,#b30000,#006600);border-radius:12px;padding:20px;text-align:center;color:#ffffff;">
+      <h1 style="font-size:28px;margin:0 0 10px;font-weight:bold;letter-spacing:1px;">
+        🎁 Secret Santa Wish List Update 🎁
+      </h1>
+      <p style="font-size:15px;margin:10px 0 20px;">
+        Hi <strong>{$giverName}</strong>!<br>
+        Your Secret Santa recipient <strong>{$receiverName}</strong> just updated their wish list.
+      </p>
+      <div style="background:#ffffff;border-radius:10px;padding:22px;margin:0 auto;max-width:480px;">
+        <p style="font-size:14px;color:#444;margin:0 0 10px;">
+          You can view their latest wishes here:
+        </p>
+        <p style="margin:12px 0;">
+          <a href="{$giverWishUrl}"
+             style="display:inline-block;background:#b30000;color:#ffffff;padding:10px 18px;border-radius:6px;
+             text-decoration:none;font-weight:bold;font-size:14px;">
+            View {$receiverName}'s Wish List
+          </a>
+        </p>
+        <p style="font-size:12px;color:#666;margin-top:14px;">
+          Checking their wish list is a great way to avoid accidentally gifting them
+          their 7th pair of Christmas socks. Unless that's the plan. 🧦
+        </p>
+      </div>
+      <p style="font-size:11px;color:#f0f0f0;margin-top:15px;">
+        This message was sent automatically when your recipient updated their wish list
+        on the Secret Santa site.
+      </p>
+    </div>
+  </div>
+</body>
+</html>
+HTML;
+
+                $altBody = "Hi {$giverName},\n\n"
+                    . "Your Secret Santa recipient {$receiverName} just updated their wish list.\n\n"
+                    . "You can view it here:\n{$giverWishUrl}\n\n"
+                    . "Happy gifting! 🎄";
+
+                try {
+                    $mail = clone $mailer;
+                    $mail->clearAllRecipients();
+                    $mail->addAddress($giver['email'], $giverName);
+                    $mail->Subject = $subject;
+                    $mail->Body    = $htmlBody;
+                    $mail->AltBody = $altBody;
+                    $mail->send();
+
+                    $savedMessage = "Your wishlist has been saved, and your Secret Santa has been notified. 🎁";
+                } catch (Exception $e) {
+                    // If mail send fails, keep original "saved" message
+                    error_log("Secret Santa wishes: Failed to send wishlist update email to {$giver['email']}: " . $e->getMessage());
+                }
+            }
+        }
+    } catch (PDOException $e) {
+        // Log but don't break page
+        error_log("Secret Santa wishes: Error while notifying Secret Santa: " . $e->getMessage());
+    }
 }
 
 // -------------------------------------------
@@ -109,7 +239,7 @@ if ($pair) {
     $recipient = $recStmt->fetch();
 }
 
-$myName = $me['first_name'] . ' ' . $me['last_name'];
+$myName  = $me['first_name'] . ' ' . $me['last_name'];
 $recName = $recipient ? ($recipient['first_name'] . ' ' . $recipient['last_name']) : null;
 
 ?>
@@ -236,7 +366,7 @@ $recName = $recipient ? ($recipient['first_name'] . ' ' . $recipient['last_name'
 <div class="container">
     <h1>🎄 Secret Santa Wishes 🎄</h1>
     <div class="subtitle">
-        Hi <span class="name-tag"><?php echo h($myName); ?></span>!
+        Hi <span class="name-tag"><?php echo h($myName); ?></span>!  
         Here you can see your recipient's wish list and set your own (up to 3 items).
     </div>
 
@@ -259,7 +389,7 @@ $recName = $recipient ? ($recipient['first_name'] . ' ' . $recipient['last_name'
                     </ul>
                 <?php else: ?>
                     <p class="empty-note">
-                        Your recipient hasn't shared any wishes yet.
+                        Your recipient hasn't shared any wishes yet.  
                         Time to get creative… or interrogate them casually. 😉
                     </p>
                 <?php endif; ?>
